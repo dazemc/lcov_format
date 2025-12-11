@@ -6,6 +6,7 @@ import 'dart:collection';
 import 'dart:convert';
 
 import 'package:collection/collection.dart';
+import 'package:duppix/duppix.dart';
 import 'package:string_scanner/string_scanner.dart';
 
 //TODO(jacobr): cleanup.
@@ -48,12 +49,14 @@ class Grammar {
       scopeName: json['scopeName'] as String,
       topLevelMatcher: GrammarMatcher.fromJson(json),
       repository: Repository.build(json),
+      topLevelPatterns: json['patterns'] as List<Object?>?,
     );
   }
 
   Grammar._({
     this.name,
     this.scopeName,
+    this.topLevelPatterns,
     required this.topLevelMatcher,
     required this.repository,
   });
@@ -65,6 +68,8 @@ class Grammar {
   final GrammarMatcher topLevelMatcher;
 
   final Repository repository;
+
+  final List<Object?>? topLevelPatterns;
 
   @override
   String toString() {
@@ -257,7 +262,9 @@ abstract class GrammarMatcher {
 /// A simple matcher which matches a single line.
 class _SimpleMatcher extends GrammarMatcher {
   _SimpleMatcher(super.json)
-      : match = RegExp(json['match'] as String, multiLine: true),
+      :
+        // match = RegExp(json['match'] as String, multiLine: true),
+        rawMatch = json['match'] as String,
         captures =
             (json['captures'] as Map<String, Object?>?)?.cast<String, Map<String, Object?>>(),
         super._();
@@ -266,14 +273,24 @@ class _SimpleMatcher extends GrammarMatcher {
     return json.containsKey('match');
   }
 
-  final RegExp match;
+  // final RegExp match;
+  late RegExp match;
+  final String rawMatch;
 
   final Map<String, Object?>? captures;
 
   @override
   bool scan(Grammar grammar, LineScanner scanner, ScopeStack scopeStack) {
+    try {
+      match = RegExp(rawMatch);
+    } on FormatException {
+      print(rawMatch);
+    }
+    // DuppixRegex(rawMatch);
     final location = scanner.location;
     if (scanner.scan(match)) {
+      // print(rawMatch);
+      // print(match);
       scopeStack.push(name, location);
       _applyCapture(grammar, scanner, scopeStack, captures, location);
       scopeStack.pop(name, scanner.location);
@@ -294,7 +311,9 @@ class _SimpleMatcher extends GrammarMatcher {
 
 class _MultilineMatcher extends GrammarMatcher {
   _MultilineMatcher(super.json)
-      : begin = RegExp(json['begin'] as String, multiLine: true),
+      :
+        // begin = RegExp(json['begin'] as String, multiLine: true),
+        rawBegin = json['begin'] as String,
         beginCaptures = json['beginCaptures'] as Map<String, Object?>?,
         contentName = json['contentName'] as String?,
         end = json['end'] == null ? null : RegExp(json['end'] as String, multiLine: true),
@@ -314,7 +333,9 @@ class _MultilineMatcher extends GrammarMatcher {
   /// A regular expression which defines the beginning match of this rule. This
   /// property is required and must be defined along with either `end` or
   /// `while`.
-  final RegExp begin;
+  // final RegExp begin;
+  late DuppixRegex begin;
+  final String rawBegin;
 
   /// A set of scopes to apply to groups captured by `begin`. `captures` should
   /// be null if this property is provided.
@@ -356,7 +377,7 @@ class _MultilineMatcher extends GrammarMatcher {
 
   void _scanBegin(Grammar grammar, LineScanner scanner, ScopeStack scopeStack) {
     final location = scanner.location;
-    if (!scanner.scan(begin)) {
+    if (!scanner.scan(begin.pattern)) {
       // This shouldn't happen since we've already checked that `begin` matches
       // the beginning of the string.
       throw StateError('Expected ${begin.pattern} to match.');
@@ -441,7 +462,29 @@ class _MultilineMatcher extends GrammarMatcher {
 
   @override
   bool scan(Grammar grammar, LineScanner scanner, ScopeStack scopeStack) {
-    if (!scanner.matches(begin)) {
+    String duppixPattern =
+        rawBegin.contains(r'^') ? rawBegin.substring(rawBegin.indexOf(r'^') + 1) : rawBegin;
+    // duppixPattern = duppixPattern.replaceAll(r'\b', '');
+    final isBoundary = rawBegin.contains(r'\b');
+    final isAnchors = rawBegin.contains(r'^');
+    if (isAnchors) {
+      duppixPattern = duppixPattern.replaceFirst(RegExp(r'^\(\?:\^\)|\^'), '');
+    }
+    if (isBoundary) {
+      // duppixPattern = duppixPattern.replaceAll(r'\b', '');
+    }
+    final testLoc = scanner.location.position;
+    final testString = scanner.substring(0, testLoc);
+    if (duppixPattern.contains(r'<')) {
+      print("Raw Pattern: $rawBegin");
+      print("DuppixPattern: $duppixPattern");
+      print("Location: $testLoc");
+      print("Scanner: $testString");
+    }
+    begin = DuppixRegex(duppixPattern, options: DuppixOptions(multiline: true, debug: true));
+
+    //TODO: Need to implement a scanner that utilizes duppix
+    if (!scanner.matches(begin.pattern)) {
       return false;
     }
 
@@ -558,6 +601,11 @@ class _IncludeMatcher extends GrammarMatcher {
 
   @override
   bool scan(Grammar grammar, LineScanner scanner, ScopeStack scopeStack) {
+    if (include == 'self') {
+      final Map<String, Object?> patternsJson = {'patterns': grammar.topLevelPatterns};
+      final selfMatcher = _PatternMatcher(patternsJson);
+      return selfMatcher.scan(grammar, scanner, scopeStack);
+    }
     final matcher = grammar.repository.matchers[include];
     if (matcher == null) {
       throw StateError('Could not find $include in the repository.');
